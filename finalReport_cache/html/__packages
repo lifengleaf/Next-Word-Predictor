@@ -1,0 +1,11 @@
+base
+knitr
+scales
+data.table
+NLP
+tm
+R.methodsS3
+R.oo
+R.utils
+ggplot2
+stringr

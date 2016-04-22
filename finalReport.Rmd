@@ -1,0 +1,896 @@
+---
+title: "Capstone Project: Next Word Predictor"
+author: '[Feng Li](https://github.com/lifengleaf)'
+date: "Apr 7, 2016"
+output: html_document
+---
+
+### EXECUTIVE SUMMARY
+
+This report provides documentation describing the process of developing a next word prediction model for the Data Science Specialization Capstone Project, a course authorized by Johns Hopkins University and offered through Coursera.
+
+The essence of the project is to take a corpus of text from a given sources, clean and analyze that text data, build N-Gram (N = 1,2,3) language models, and create a function to predict the next likely word following the word sequence provided by users, balancing accuracy with speed and scalability.
+
+
+### GET DATA
+
+The dataset used in this project is from a corpus called [HC Corpora](http://www.corpora.heliohost.org/). It can be downloaded
+from [this link](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip). It's a zip file including blog posts, news articles, and Twitter tweets in four languages (English, German, Finnish, and Russian). For this project, we use the English database.
+
+After downloading the dataset, we split the data into training sets(70%) and test sets(30%). For convenience's sake, we use a function to make samples from the training sets. The whole database is used in this final report, to extract as much information as provided to make accountable inference.
+
+```{r, eval=FALSE}
+
+# download and unzip data
+url <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+fileName<- "Coursera-SwiftKey.zip"
+download.file(url, destfile = fileName)
+unzip(fileName)
+
+for (src in c('blogs', 'news', 'twitter')) {
+  # read data
+  txt<- readLines(sprintf("final/en_US/en_US.%s.txt", src), encoding = 'UTF-8')
+  
+  # split data into training and test sets
+  set.seed(123)
+  txt<- sample(txt, length(txt), replace = FALSE)
+  TR<- round(length(txt)*.7)
+  train <- txt[1:TR]
+  test <- txt[-(1:TR)]
+  
+  # write datasets into files
+  write(train, sprintf("%sTrain.txt", src))
+  write(test, sprintf("%sTest.txt", src))
+}
+
+# make samples from training sets
+sampleTrain<- function(src, rate = 1.0, seed = 123){
+  txt<- readLines(sprintf("%sTrain.txt", src), encoding = 'UTF-8')
+  
+  set.seed(seed)
+  txt<- sample(txt, length(txt) * rate, replace = FALSE)
+  txt
+}
+
+# use the whole training sets for the final report
+twitter<- sampleTrain('twitter', 1)
+blogs<- sampleTrain('blogs', 1)
+news<- sampleTrain('news', 1)
+
+```
+
+
+### CLEAN DATA
+
+With the widely and intensely used social media, huge raw data is being generated every second. But raw data cannot be put into use before being cleaned and clear. Specifically, we've done the following tasks to preprocess the raw data:
+
+1. Remove smileys and non-ASCII characters, for the data still contains foreign text after language filtering.
+
+2. Remove "RT" symbols, as common in tweets.
+
+3. Revert symbol & to "and",  / to "or", in their general meaning.
+
+4. Lower case: case is not important for next word prediction, for example, "I" and "i" are treated as one word type. 
+
+5. Remove period in abbreviation. Remove punctuation except for apostrophy, for it indicates possession or omission of letters. Replace end of sentence punctuation (: ? ! .) with mark <eos>.
+
+5. Replace numbers with number tag <num>.
+
+6. Remove website URLs.
+
+7. Remove excess whitespace.
+
+And we decide not to do the following:
+
+1. Remove stopwords. They are also the likely next word we're going to predict, some of which occur more frequently. 
+
+2. Stem words. we use full wordform rather then stemmed words in the N-Grams models.
+
+3. Remove sparse words. They provide clues to estimate the probability of  N-Grams not seen in the training set but will likely appear in a test set.
+
+4. Remove profanity words. It takes a long time to implement the filtering, and we estimate this loss will outweigh the gain.
+
+Considering the database is huge, we decide to clean by chunks of 5000 lines of text.
+
+
+```{r, message=FALSE}
+library(tm)
+
+# cleanCorpus:
+#    calls the function cleanText, and cleans a corpus by chunks with the chunkSize
+cleanCorpus<- function(corpus, chunkSize){
+      # create an empty list to save cleaned data
+      corpusClean<- c()
+      
+      # get number of chunks and the remaining data
+      chunkNum<- floor(length(corpus) / chunkSize)
+      remain<- length(corpus) - chunkSize*chunkNum
+      
+      # first clean the remaining data
+      corpusClean[1:remain]<- cleanText(corpus[1:remain])
+      
+      # remove cleaned data
+      corpus<- corpus[-(1:remain)]
+      
+      for (i in 1:chunkNum) {
+            # starting and ending index of the current chunk
+            start<- remain + 1 + chunkSize*(i-1)
+            end<- start + chunkSize -1
+            
+            corpusClean[start:end]<- cleanText(corpus[1:chunkSize])
+            
+            # remove cleaned data
+            corpus<- corpus[-(1:chunkSize)]
+            
+            # provide progress
+            printf("chunk %d / %d cleaned \n", i, chunkNum)
+      }
+
+      corpusClean
+}
+
+
+# cleanText:
+#    cleans a character string
+#    will be used to clean the training data, test data and input data
+
+cleanText<- function(txt) { 
+  
+  # remove non-ASCII characters
+  txt<- iconv(txt, "latin1", "ASCII", sub = "")
+  
+  # remove smileys
+  txt <- gsub("<3|</3|\\bxd\\b|\\bx-d\\b|:&|:-&|:p\\b|:-p\\b|
+              \\b=p\\b|\\b:d\\b|;d\\b|\\b:o\\)\\b|\\b8\\)|\\b8d
+              \\b|\\b8-d\\b|:3\\b|:-x\\b|:x\\b|:o\\)|:-d\\b|:-o
+              \\b|:o\\b|o_o\\b|o-o\\b|=p\\b|:s\\b|\\bd:", " ", txt)
+  
+  # remove RTs
+  txt <- gsub("\\brt\\b", " ", txt)
+  txt <- gsub("rt2win", " ", txt)
+  txt <- gsub("<3RT", " ", txt)
+  
+  # revert symbol & / to words
+  txt<- gsub("\\&", " and ", txt)
+  txt <-gsub("\\/", " or ", txt)
+  
+  # remove period in abbreviation
+  txt <- gsub("\\s([A-Z])\\.\\s", " \\1", txt)
+  txt <- gsub("\\s([A-Z][a-z]{1,3})\\.\\s", " \\1", txt)
+  txt <- gsub("^([A-Z])\\.\\s", " \\1", txt)
+  txt <- gsub("^([A-Z][a-z]{1,3})\\.\\s", " \\1", txt)
+  
+  txt<- tolower(txt)
+  
+  # replace :.?! with end of sentence tags <eos>
+  # and eliminate other punctuation except apostrophes
+  txt<- gsub("[:.?!]+", " <eos> ", gsub("(?![:.?!'])[[:punct:]]", " ", txt, perl=T))
+  
+  # remove errant apostrohes
+  txt<-gsub(" ' "," ", txt)        
+  txt<-gsub("\\' ", " ", txt)
+  txt<-gsub("^'", "", txt)
+  
+  # replaces numbers with number tag <num>
+  txt<- gsub("[0-9]+"," <num> ", txt)
+  
+  # removes website Urls
+  txt <-gsub(" www(.+) ", " ", txt)
+  
+  # remove extra spaces
+  txt<- gsub("^[ ]","",txt)
+  txt<- gsub("[ ]$", "", txt)
+  txt<- stripWhitespace(txt)
+  
+  txt
+}
+
+```
+
+
+```{r, eval=FALSE}
+
+# clean training data
+blogsClean<- cleanCorpus(blogs, 5000)
+newsClean<- cleanCorpus(news, 5000)
+twitterClean<- cleanCorpus(twitter, 5000)
+
+if(!file.exists("trainClean")){
+  dir.create("trainClean")
+}
+
+# Writes cleaned data into files
+write(blogsClean, "trainClean/blogsTrain.txt")
+write(newsClean, "trainClean/newsTrain.txt")
+write(twitterClean, "trainClean/twitterTrain.txt")
+
+```
+
+### UNDERSTAND DATA
+
+To understand the data includes not only an understanding of relationships between vocabulary size and unique words in the database, but also the distributions of various N-Grams. We deal with the first question, by creating a full corpus of all the training and test datasets for three sources (twitter, blogs, and news).
+
+The first two columns of the table show the total counts of word types and word tokens. Word token is the number of total words, while word type is the number of unique words. The *Type/Token Ratio (TTR)* is a well known measure of language comparison, which is simply the total word types divided by tokens. The TTR indicates complexity, where the more types in comparison to the number of tokens, the more varied is the vocabulary.
+
+All training data have a greater lexical variety, because they contains 70% of the total data. And twitter seems to have more varied vocabulary, probably because they are strictly confined to limited word counts. And news articles tend to use more repetitive vocabulary than blogs and twitter.
+
+*Lexical diversity* shows a similar pattern in the three sources. Here diversity is calculated by means of a corrected TTR , which is the number of word types divided by the square root of twice the number of word tokens. 
+
+```{r,eval=FALSE}
+library(quanteda)
+
+# read training data as a corpus
+files<- textfile("trainClean/*.txt")
+myCorpus<- corpus(files)
+trainInfo<- summary(myCorpus)
+
+# Diversity: the number of different words divided by 
+# the square root of twice the number of words in the sample
+getDiversity<- function(token, type){
+  return(type / sqrt(2*token))
+}
+
+trainSummary<- data.frame(Source = trainInfo$Text,
+                         Types = trainInfo$Types,
+                         Tokens = trainInfo$Tokens,
+                         TypeTokenRatio = trainInfo$Types / trainInfo$Tokens,
+                         Diversity = c(getDiversity(trainInfo$Tokens, trainInfo$Types)))
+
+# reduce RAM load
+rm(myCorpus)
+
+# read test data as a corpus
+files<- textfile("testClean/*.txt")
+myCorpus<- corpus(files)
+testInfo<- summary(myCorpus)
+
+testSummary<- data.frame(Source = testInfo$Text,
+                         Types = testInfo$Types,
+                         Tokens = testInfo$Tokens,
+                         TypeTokenRatio = testInfo$Types / testInfo$Tokens,
+                         Diversity = c(getDiversity(testInfo$Tokens, testInfo$Types)))
+
+# reduce RAM load
+rm(myCorpus)
+
+dataSummary<- rbind(trainSummary, testSummary)
+write.table(dataSummary, "dataSummary.csv")
+```
+
+```{r, cache=TRUE}
+dataSummary<- read.csv("dataSummary.csv")
+knitr::kable(dataSummary,
+             caption = "Summary of Training and Test Data")
+
+```
+
+### GENERATE N-GRAM
+
+N-Gram is a contiguous sequence of n words from a given sequence of text. For this project, we choose to extract N-Gram of size 1, 2 and 3, refered to as unigram, bigram and trigram, to build the predictive model.
+
+In N-Gram language models, only the N-1 last words are considered relevent when predicting the next word, according to Markov assumption.
+
+$P(w_{k}\mid w_{1}, w_{2},\ldots,w_{k-2}, w_{k-1}) \approx P(w_{k}\mid w_{k-n+1}, ... ,w_{k-1})$
+
+Maximum likelihood probability estimates (MLE) maximize the likelihood on the training data.
+
+$P_{ML}(w_{k}\mid w_{k-n+1},\ldots,w_{k-1}) = \frac{c(w_{k-n+1}^{k})}{c(w_{k-n+1}^{k-1})}$
+
+where $w_{i}^{j} =w_{i}, w_{i+1},\ldots,w_{j}$, $c(w_{i}^{j})$ is the counts of occurrences of the n-gram $w_{i}^{j}$.
+
+We use data table rather than data frame to store the N-Grams, for its priority in efficiency of file reading. Considering the database we're using is huge, we have to process the data in chunks, and bind separate data tables together later.
+
+#### 1. unigram
+
+```{r, eval=FALSE}
+library(R.utils)
+
+# read datasets separately
+blogs<- readLines("trainClean/blogs.txt", encoding = 'UTF-8')
+
+news<- readLines("trainClean/news.txt", encoding = 'UTF-8')
+
+twitter<- readLines("trainClean/twitter.txt", encoding = 'UTF-8')
+
+# combine data into one single corpus
+oneCorpus<- corpus(blogs) + corpus(news) + corpus(twitter)
+
+rm(blogs, news, twitter)
+
+# pull out the text element from the corpus list 
+TEXT<- texts(oneCorpus)
+
+# generate bigrams by chunks of 10,000 documents
+# number of loop runs
+step<- trunc(length(TEXT)/10000)
+
+remain<- length(TEXT)-step * 10000
+
+library(tau) 
+# count all n-grams of order n
+ngram <- function(n) {
+  textcnt(TEXTPart, method = "string", n = as.integer(n),
+          split = "[[:space:]]+",
+          decreasing = TRUE)
+}
+# first deal with the remaining data
+TEXTPart<- TEXT[1:remain]
+uniGram<- ngram(1)
+
+library(data.table)
+uniGramDT<- data.table(Uni = names(uniGram),
+                       Counts = unclass(uniGram))
+
+write.csv(uniGramDT,"uniGramDT1.csv")
+
+# remove processed data
+TEXT<- TEXT[-(1:remain)]
+
+
+for (i in 1:step) {
+  # provide progress
+  print(paste("Iteration",i,"of",step))
+  
+  # process the first 10000 lines each time
+  TEXTPart<- TEXT[1:10000]
+  uniGram<- ngram(1)
+  
+  uniGramDTTemp<- data.table(Uni = names(uniGram),
+                             Counts = unclass(uniGram))
+  
+  write.csv(uniGramDTTemp,paste("ngram/uniGramDT",(i+1),".csv",sep=""))
+  
+  printf(paste("uniGramDF",(i+1),".csv"," is created \n\n", sep=""))
+  
+  # bind all the unigram by row
+  uniGramDT<-rbind(uniGramDT, uniGramDTTemp)
+  uniGramDT<-uniGramDT[, list(Counts = sum(Counts)), by = Uni]
+  
+  # remove processed data
+  TEXT<-TEXT[-(1:10000)]
+}
+
+write.csv(uniGramDT,"ngram/uniGramDT.csv")
+rm(uniGramDTTemp)
+
+```
+
+#### 2. bigram
+
+```{r, eval=FALSE}
+# pull out the text element
+TEXT<- texts(oneCorpus)
+
+# generate bigrams by chunks of 10,000 documents
+# number of loop runs
+step<- trunc(length(TEXT)/10000)
+remain<- length(TEXT)-step * 10000
+
+ngram <- function(n) {
+  textcnt(TEXTPart, method = "string", n = as.integer(n),
+          split = "[[:space:]]+",
+          decreasing = TRUE)
+}
+
+# first deal with the remaining data
+TEXTPart<- TEXT[1:remain]
+biGram<- ngram(2)
+
+biGramDT<- data.table(Bi = names(biGram),
+                      Counts = unclass(biGram))
+
+write.csv(biGramDT,"ngram/biGramDT1.csv")
+
+# remove processed data
+TEXT<- TEXT[-(1:remain)]
+
+
+for (i in 1:step) {
+  # provide progress
+  print(paste("Iteration",i,"of",step))
+  
+  # process the first 10000 lines each time
+  TEXTPart<- TEXT[1:10000]
+  biGram<- ngram(2)
+  
+  biGramDTTemp<- data.table(Bi = names(biGram),
+                            Counts = unclass(biGram))
+  
+  write.csv(biGramDTTemp,paste("ngram/biGramDT",(i+1),".csv",sep=""))
+  
+  printf(paste("biGramDT",(i+1),".csv"," is created \n\n", sep=""))
+  
+  # bind all the bigram by row
+  biGramDT<-rbind(biGramDT, biGramDTTemp)
+  biGramDT<-biGramDT[, list(Counts = sum(Counts)), by = Bi]
+  
+  # write data table to file every 35 chunks
+  if(i %% 35 == 0){
+    write.csv(biGramDT,paste("ngram/biGramDTBind",i/35,".csv",sep=""))
+    
+    # reinitiate data table to empty
+    biGramDT<-data.table()
+  }
+  
+  # remove processed data
+  TEXT<-TEXT[-(1:10000)]
+}
+
+nBind<- ceiling(i/35)
+write.csv(biGramDT,paste("ngram/biGramDTBind",nBind,".csv",sep=""))
+
+# merge all bigrams into one data table
+biGramDT<- data.table()
+for (i in 1:nBind) {
+  biGramDTTemp<- fread(paste("ngram/biGramDTBind",i,".csv",
+                             sep=""),drop = 1)
+  biGramDT<-rbind(biGramDT, biGramDTTemp)
+  biGramDT<-biGramDT[, list(Counts = sum(Counts)), by = Bi]
+}
+
+write.csv(biGramDT,"ngram/biGramDT.csv")
+```
+
+
+#### 3. trigram
+
+```{r, eval=FALSE}
+# pull out the text
+TEXT<- texts(oneCorpus)
+
+# number of loop runs
+step<- trunc(length(TEXT)/10000)
+remain<- length(TEXT)-step * 10000
+
+ngram <- function(n) {
+  textcnt(TEXTPart, method = "string", n = as.integer(n),
+          split = "[[:space:]]+",
+          decreasing = TRUE)
+}
+
+# deal with the remain
+TEXTPart<- TEXT[1:remain]
+triGram <- ngram(3)
+
+names(triGram) <- gsub("^\'", "", names(triGram))
+
+triGramDT<-data.table(Tri = names(triGram), 
+                      Counts = unclass(triGram))
+
+write.csv(triGramDT,"ngram/triGramDT1.csv")
+
+
+TEXT<- TEXT[-(1:remain)]
+
+for (i in 1:step) {
+  
+  print(paste("Iteration",i,"of",step))
+  
+  TEXTPart<- TEXT[1:10000]
+  triGram <- ngram(3)
+  
+  names(triGram) <- gsub("^\'","",names(triGram))
+  
+  triGramDTTemp<-data.table(Tri = names(triGram),
+                            Counts = unclass(triGram))
+  
+  write.csv(triGramDTTemp, paste("ngram/triGramDT",(i+1),".csv",sep=""))
+  
+  printf(paste("triGramDT",(i+1),".csv"," is created \n\n", sep=""))
+  
+  # bind all trigrams by row
+  triGramDT<-rbind(triGramDT, triGramDTTemp)
+  triGramDT<-triGramDT[, list(Counts = sum(Counts)), by = Tri]
+  
+  # write data table to file every 30 chunks
+  if(i %% 30 == 0){
+    write.csv(triGramDT,paste("ngram/triGramDTBind",i/30,".csv",sep=""))
+    
+    # reinitiate data table to empty
+    triGramDT<-data.table()
+  }
+  
+  TEXT<-TEXT[-(1:10000)]
+}
+
+nBind<- ceiling(i/30)
+write.csv(triGramDT,paste("ngram/triGramDTBind",nBind,".csv",sep=""))
+
+# bind into two large data tables
+triGramDTMerge1<- data.table()
+for (i in 1:(nBind/2)) {
+  triGramDTTemp<- fread(paste("ngram/triGramDTBind",i,".csv",sep=""),
+                       drop = 1)
+  triGramDTMerge1<-rbind(triGramDTMerge1, triGramDTTemp)
+  triGramDTMerge1<-triGramDTMerge1[, list(Counts = sum(Counts)), by = Tri]
+}
+
+write.csv(triGramDTMerge1,"ngram/triGramDTMerge1.csv")
+
+
+triGramDTMerge2<- data.table()
+for (i in (nBind/2+1):nBind) {
+  triGramDTTemp<- fread(paste("ngram/triGramDTBind",i,".csv",sep=""),
+                       drop = 1)
+  triGramDTMerge2<-rbind(triGramDTMerge2, triGramDTTemp)
+  triGramDTMerge2<-triGramDTMerge2[, list(Counts = sum(Counts)), by = Tri]
+}
+
+write.csv(triGramDTMerge2,"ngram/triGramDTMerge2.csv")
+
+# bind into one single data table
+triGramDT<-rbind(triGramDTMerge1, triGramDTMerge2)
+triGramDT<-triGramDT[, list(Counts = sum(Counts)), by = Tri]
+rm(triGramDTTemp,triGramDTMerge1, triGramDTMerge2)
+
+write.csv(triGramDT,"ngram/triGramDT.csv")
+
+```
+
+### EXPLORATORY ANALYSIS
+
+The following plots provide a glimpse of the distribution of the unigram, bigram and trigram counts.
+
+```{r, message=FALSE, cache=TRUE}
+library(R.utils)
+library(data.table)
+library(ggplot2)
+uniGramDT<- fread("ngram/uniGramDT.csv", drop = 1)
+printf("Total number of uniGram: %d", nrow(uniGramDT))
+printf("Percent of uniGram occuring only once: %0.2f", nrow(uniGramDT[Counts == 1])/ nrow(uniGramDT) * 100)
+
+# plot distribution of frequency
+m <- ggplot(uniGramDT, aes(x = log10(Counts)))
+m + geom_density() + xlab("log10 (Unigram Frequency)")
+
+rm(uniGramDT)
+
+biGramDT<- fread("ngram/biGramDT.csv", drop = 1)
+printf("Total number of biGram: %d", nrow(biGramDT))
+printf("Percent of biGram occuring only once: %0.2f", nrow(biGramDT[Counts == 1])/ nrow(biGramDT) * 100)
+
+m <- ggplot(biGramDT, aes(x = log10(Counts)))
+m + geom_density() + xlab("log10 (Bigram Frequency)")
+rm(biGramDT)
+
+triGramDT<- fread("ngram/triGramDT.csv", drop = 1)
+printf("Total number of triGram: %d", nrow(triGramDT))
+printf("Percent of triGram occuring only once: %0.2f", nrow(triGramDT[Counts == 1])/ nrow(triGramDT) * 100)
+
+# due to memory limit, remove trigrams with single occurance
+triGramSubset<- triGramDT[Counts > 1]
+rm(triGramDT)
+# write.csv(triGramSubset,"ngram/triGramSubset.csv")
+
+m <- ggplot(triGramSubset, aes(x = log10(Counts)))
+m + geom_density() + xlab("log10 (Trigram Frequency)")
+
+```
+
+As the level of N increases (from 1 to 2 to 3), the N-Grams data will be more skewed to the right. More than 80% of the triGrams are seen only once, corresponding to a much longer tail and more right skew in the frequency distribution figure,  the mass of the distribution is concentrated on the left.
+
+All single trigrams are removed due to RAM load, therefore, no points in the plot appear at log10(Trigram Frequency)=0.
+
+
+```{r, eval=FALSE}
+
+# build frequency of frequency table
+freqUni<-data.frame(table(uniGramDT$Counts))
+names(freqUni)<- c("Counts", "CountsFreq")
+freqUni$Counts<- as.numeric(freqUni$Counts)
+write.csv(freqUni,"ngram/freqUni.csv")
+
+freqBi<-data.frame(table(biGramDT$Counts))
+names(freqBi)<- c("Counts", "CountsFreq")
+freqBi$Counts<- as.numeric(freqBi$Counts)
+write.csv(freqBi,"ngram/freqBi.csv")
+
+freqTri<-data.frame(table(triGramDT$Counts))
+names(freqTri)<- c("Counts", "CountsFreq")
+freqTri$Counts<- as.numeric(freqTri$Counts)
+write.csv(freqTri,"ngram/freqTri.csv")
+
+```
+
+```{r, cache=TRUE}
+# read frequency of frequency table
+freqUni<- read.csv("ngram/freqUni.csv")[-1]
+freqBi<- read.csv("ngram/freqBi.csv")[-1]
+freqTri<- read.csv("ngram/freqTri.csv")[-1]
+
+# plot frequency of frequency
+library(scales)     
+scatter.smooth(log10(freqUni$Counts), log10(freqUni$CountsFreq),
+               ylab="log10(Freqency of Counts)",xlab="log10 (Unigram Counts)")
+rm(freqUni)
+
+scatter.smooth(log10(freqBi$Counts), log10(freqBi$CountsFreq),
+               ylab="log10(Freqency of Counts)",xlab="log10 (Bigram Counts)")
+rm(freqBi
+   )
+scatter.smooth(log10(freqTri$Counts), log10(freqTri$CountsFreq),
+               ylab="log10(Freqency of Counts)",xlab="log10 (Trigram Counts)")
+rm(freqTri)
+
+```
+
+As is shown in the figures, the frequencies reduce rapidly from unigrams to trigrams, and the right sides of the plot become thinner.
+
+
+### MAKE PREDICTION
+
+To increase the efficiency of data reading and accessing, we create a dictionary in the form of named vector. The key of the vector is the index of unigram table, and the values are corresponding unigram instances. We can access the ith word in this way: `names(dict[i])`. This makes sense because it's much faster to find by integer than by characters.
+
+Then we map the three N-Grams to data tables with two parts: one is the keys of the words in an instance (1 key for unigram, 2 keys for bigram, 3 keys for trigram), and the counts of that instance.
+
+We take spacial care of the `<eos>` and `<num>` marks. Specifically, we delete all the N-Grams with repetitive marks, such as: `<eos> <eos>` `<num> <num>` `<num> <eos>` `<eos> <num>`. we do this out of the following concerns:
+
+* repetitive marks have high frequency, if not removed, they'll result in dead loop when trying to predict next word.
+
+* some marks sequences are actually the result of not cleaning thoroughly. For example, `<num> <eos>` may be a decimal point following a digit.
+
+* However, we didn't do this during the data cleaning, so it will inevitably reduce the prediction accuracy in the evaluation a little.
+
+```{r, eval=FALSE}
+
+uniGramDT<- fread("ngram/uniGramDT.csv", drop = 1)
+biGramDT<- fread("ngram/biGramDT.csv", drop = 1)
+triGramSubset<- fread("ngram/triGramSubset.csv", drop = 1)
+
+# create a dictionay using all the single word types
+dict<- 1:nrow(uniGramDT)
+names(dict) <- uniGramDT$Uni
+
+# toNumbers:
+#   takes in a named N-Gram counts vector, and a named dictionary vector, outputs a matrix with keys of the words in the N-Grams and the corresponding counts
+#   thanks to Taiki Sakai for the example code
+toNumbers<- function(v, dict) {
+  # split the names of v vector into w1, w2, w3...
+  splitNames <- sapply(names(v), function(x) strsplit(x, ' '))
+  
+  # get the number of columns (1 for unigrams, 2 for bigrams...)
+  cols <- length(splitNames[[1]])
+  
+  # initialize the result matrix
+  result <- matrix(0, length(v), cols)
+  
+  # map the 1st column with keys of w1, 2nd with keys of w2...
+  for(i in 1:cols){ 
+    result[,i] <- dict[sapply(splitNames, function(x) x[[i]])]
+  }
+  
+  # combine the new columns with the colSum counts
+  unname(cbind(result, v))
+}
+
+# map unigram table
+uniVector<- uniGramDT$Counts
+names(uniVector)<- uniGramDT$Uni
+uniGram<- toNumbers(uniVector, dict)
+colnames(uniGram)<- c("w1", "Counts")
+uniGram<- uniGram[order(Counts,decreasing=TRUE)]
+write.csv(uniGram,"ngram/uniGram.csv")
+
+# map bigram table
+biVector<- biGramDT$Counts
+names(biVector)<- biGramDT$Bi
+biGram<- toNumbers(biVector, dict)
+colnames(biGram)<- c("w1", "w2", "Counts")
+
+# remove multiple <eos> and <num>
+biGram<- biGram[(!(w1 == 1 & w2 == 1)) & (!(w1 == 9 & w2 == 9)) & (!(w1 == 1 & w2 == 9)) & (!(w1 == 9 & w2 == 1))]
+biGram<- biGram[order(Counts,decreasing=TRUE)]
+write.csv(biGram,"ngram/biGram.csv")
+
+# map trigram table
+triVector<- triGramSubset$Counts
+names(triVector)<- triGramSubset$Tri
+triGram<- toNumbers(triVector, dict)
+colnames(triGram)<- c("w1", "w2", "w3", "Counts")
+# remove multiple <eos> and <num>
+triGram<- triGram[(!(w1 == 1 & w2 == 1)) & (!(w2 == 1 & w3 == 1)) & (!(w1 == 1 & w3 == 1))]
+triGram<- triGram[(!(w1 == 9 & w2 == 9)) & (!(w2 == 9 & w3 == 9))]
+triGram<- triGram[(!(w1 == 1 & w2 == 9)) & (!(w2 == 1 & w3 == 9)) 
+                  & (!(w1 == 9 & w2 == 1)) & (!(w2 == 9 & w3 == 1))]
+
+triGram<- as.data.table(triGram)[order(Counts,decreasing=TRUE)]
+write.csv(triGram,"ngram/triGram.csv")
+
+```
+
+To locate the key (index) of a given word, a lookup function is created. We use this function to map a input character string into integers.
+
+To clean the input, we use the `cleanText` function used to preprocess the training data, and what's more, we only keep the last two words if there are more than two words in the input.
+
+We use back-off method in the main predict function algorithm: when there are no trigrams starting with the last two words of the input, we backoff to bigram; when there are no bigrams starting with the last word in the input, we backoff to unigram, simply using the unigrams with highest counts. All the three N-Gram table have been sorted decreasingly by counts, so we can use `head` function to get the most frequently occuring instances.
+
+The basic flow of the algorithm is as follows:
+
+1. The user inputs a sequence of words `input` and the maximum number of predicted words `max` to the `predict` function;
+
+2. The `cleanInput` cleans the input, and keeps only the last two if there are more words in `input`, throws an error when there're no words;
+
+3. Number of words in input is calculated. If there is just one word, `lookup` the word in the dictionary, and then search for bigrams starting with that word;
+
+3(a). If no satisfied bigrams exist, simply return the first `max` frequently occuring unigrams;
+
+3(b). If any bigrams are found, return the first `max` bigrams;
+
+4. If there are two words in `input`, `lookup` both words in the dictionary, and then search for trigrams starting with these two words;
+
+4(a). If no trigrams exist, search for bigrams starting with the second word in input;
+
+4(a)(i). If that bigrams don't exist, return the first `max` unigrams;
+
+4(a)(ii). If that bigrams are found, return the first `max` subset bigrams;
+
+4(b). If any trigrams are found, return the first `max` subset trigrams.
+
+```{r, message=FALSE, cache=TRUE}
+library(data.table)
+uniGram<- fread("ngram/uniGram.csv", drop = 1)
+biGram<- fread("ngram/biGram.csv", drop = 1)
+triGram<- fread("ngram/triGram.csv", drop = 1)
+
+uniGramDT<- fread("ngram/uniGramDT.csv", drop = 1)
+# create a dictionay using all the single word types
+dict<- 1:nrow(uniGramDT)
+names(dict) <- uniGramDT$Uni
+n<- length(dict)
+
+# lookup:
+#   takes in a character string, outputs the corresponding key (index) in the dictionary
+lookup<- function(word){
+  for(i in 1:n){
+    
+    if (names(dict[i]) == word){
+      return(i)
+    }
+  }
+  return(NULL)
+}
+
+# cleanInput:
+#   preprocesses input: giving <num> to digits, replacing :?!. with <eos> mark, removing extra spaces
+#   keeping only the last two words for prediction when multiple words in input
+
+cleanInput <-function(input) {
+  input<- cleanText(input)
+  
+  splitInput<- unlist(strsplit(input, " "))
+  n<- length(splitInput)
+  
+  if(n == 0){
+    stop("Please input some words")
+  }
+  
+  # if more than 2 words in input, keep only last two
+  if(n > 2){
+    input<- paste0(splitInput[n-1], " ", splitInput[n], sep = "")
+  }
+  
+  return(input)
+}
+
+
+
+# predict:
+#   takes in character strings, and outputs a vector of words which have highest conditional pobability given the input
+#   when no result found in higher order N-Gram, backoff to lower order N-Grams
+
+predict <-function(input, max = 5){
+  input <- cleanInput(input)
+  
+  inputSplit<- unlist(strsplit(input, " "))
+  inputSize<-length(inputSplit)
+  
+  # if input has one word
+  if(inputSize == 1){
+    ind<- lookup(input)
+    
+    # if input not found in dictionary
+    if (is.null(ind)){
+      result<- head(uniGram, max)$w1
+    }
+    
+    else {
+      result<- head(biGram[w1 == ind], max)$w2
+    }
+  }
+  
+  # if input has two words
+  else{
+    indw1<- lookup(inputSplit[1])
+    indw2<- lookup(inputSplit[2])
+    subTri<- triGram[w1 == indw1 & w2 == indw2]
+    
+    if(nrow(subTri) == 0){
+      # if w1w2 not found in trigram, backoff to bigram
+      subBi<- biGram[w1 == indw2]
+      
+      if (nrow(subBi) == 0){
+        result<- head(uniGram, max)$w1
+      }
+      
+      else {
+        result<- head(subBi, max)$w2
+      }
+    }
+    
+    else {
+      result<- head(subTri, max)$w3
+    }
+  }
+  resultWord<- names(dict[result])
+  resultWord
+}
+
+```
+
+
+### EVALUATE
+
+In this part, we use the test data to evaluate the accuracy rate of the predition model.
+
+Specifically, we create a `splitSent` function to split a line of text into string pairs, each of which contains a word and the words before it. That is to say, every line of text will yield as many predictions as the number of words in it.
+
+Then we use this function to split multiple lines of text from a file, feed the splited lines to `predict` function, and compare the predicted results to the original next word. `getAccuracy` function is create to perform this task. Instead of checking whether the prediction is the same as the original next word, this function checks whether the latter is in a length, say 10, of predicted next words vector. Here we calculate the accuracy based on the first 10 lines of test data.
+
+```{r, cache=TRUE}
+# load test data sets
+blogsTest<- readLines("blogsTest.txt", encoding = 'UTF-8', n = 10)
+newsTest<- readLines("newsTest.txt", encoding = 'UTF-8', n = 10)
+twitterTest<- readLines("twitterTest.txt", encoding = 'UTF-8', n = 10)
+
+# splitSent
+#    returns a matrix containing in row i the last ith word of the line and all the words before it.
+
+splitSent<- function(line) {
+  line<- cleanText(line)
+  
+  library(stringr)
+  
+  n<-length(unlist(strsplit(line, " ")))
+  # initialize the matrix
+  m<- matrix(nrow = n-1, ncol = 2)
+  
+  for (i in 1:(n-1)){
+    m[i, ]<- c(word(line, 1, -(i+1)), word(line, -i))
+  }
+  
+  return(m)
+}
+
+# getAccuracy:
+#    takes in a file containing multiple lines of text, output the accuracy rate when performing the prediction model on it
+
+getAccuray<- function(file){
+  l<- sapply(file, splitSent)
+  
+  trueSum<- 0
+  allSum<- 0
+  
+  for (i in 1:length(l)) {
+    
+    for (j in 1:(dim(l[[i]])[1])) {
+      
+      pred<- predict(l[[i]][j, 1], 10)
+      
+      allSum<- allSum + 1
+      
+      if (l[[i]][j, 2] %in% pred)
+        trueSum = trueSum+1
+    }
+    
+  }
+  accuracy<- round(trueSum / allSum, 4)
+  accuracy
+}
+
+print(paste("Accuracy on blogs test data: ", getAccuray(blogsTest)))
+print(paste("Accuracy on news test data: ", getAccuray(newsTest)))
+print(paste("Accuracy on twitter test data: ", getAccuray(twitterTest)))
+
+```
+
+*(end)*
