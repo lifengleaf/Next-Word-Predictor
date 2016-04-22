@@ -1,0 +1,17 @@
+---
+title: "about"
+output: html_document
+---
+
+This is an online Next Word Predictor (NWP), built as the capstone project of [Data Science Specialization on Coursera](https://www.coursera.org/learn/data-science-project/).
+
+Before using the model, it will take you about 20 seconds to load the data. **Start when you see "input something.."**.
+ 
+When you input a sequence of English words in the textbox, you'll get a list of predicted next word, ordered by conditional probability which the model assigns.
+
+If you input more than two words, the NWP will keep only the last two for prediction.
+
+There are two special marks in the output list: `<num>` for digital numbers , while`<eos>` is end of sentence mark to replace punctuation `!.?:`.
+
+For more information, you can turn to next tab "how does it work", or the code on [Github](https://github.com/lifengleaf/capstone).
+
